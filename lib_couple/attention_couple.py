@@ -13,6 +13,38 @@ from modules.devices import device, dtype
 from .attention_masks import get_mask, lcm_for_list
 
 
+def _cond_to_tensor(cond) -> torch.Tensor:
+    while isinstance(cond, (list, tuple)) and len(cond) == 1:
+        cond = cond[0]
+
+    if isinstance(cond, dict):
+        for key in ("crossattn", "cross_attn"):
+            tensor = cond.get(key)
+            if torch.is_tensor(tensor):
+                return tensor
+
+    if torch.is_tensor(cond):
+        return cond
+
+    raise TypeError(f"Unsupported Forge Couple conditioning type: {type(cond)!r}")
+
+
+def _fit_cond_batch(cond: torch.Tensor, batch_size: int) -> torch.Tensor:
+    if cond.dim() == 2:
+        cond = cond.unsqueeze(0)
+    if cond.dim() == 4 and cond.shape[1] == 1:
+        cond = cond.squeeze(1)
+
+    if cond.shape[0] == batch_size:
+        return cond
+
+    if cond.shape[0] == 1:
+        return cond.repeat(batch_size, 1, 1)
+
+    repeats = (batch_size + cond.shape[0] - 1) // cond.shape[0]
+    return cond.repeat(repeats, 1, 1)[:batch_size]
+
+
 class AttentionCouple:
     batch_size: int
 
@@ -33,10 +65,10 @@ class AttentionCouple:
         mask = mask / mask.sum(dim=0, keepdim=True)
 
         conds = [
-            kwargs[f"cond_{i}"][0][0].to(device=device, dtype=dtype)
+            _cond_to_tensor(kwargs[f"cond_{i}"]).to(device=device, dtype=dtype)
             for i in range(1, num_conds)
         ]
-        num_tokens = [cond.shape[1] for cond in conds]
+        num_tokens = [cond.shape[-2] for cond in conds]
 
         @torch.inference_mode()
         def attn2_patch(q, k, v, extra_options):
@@ -50,7 +82,9 @@ class AttentionCouple:
             lcm_tokens = lcm_for_list(num_tokens + [k.shape[1]])
             conds_tensor = torch.cat(
                 [
-                    cond.repeat(cls.batch_size, lcm_tokens // num_tokens[i], 1)
+                    _fit_cond_batch(cond, cls.batch_size).repeat(
+                        1, lcm_tokens // num_tokens[i], 1
+                    )
                     for i, cond in enumerate(conds)
                 ],
                 dim=0,

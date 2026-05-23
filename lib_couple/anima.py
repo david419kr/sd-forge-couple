@@ -10,6 +10,62 @@ from modules.devices import device, dtype
 from .attention_masks import get_dit_mask, lcm_for_list
 
 
+def _squeeze_single_conditioning(tensor: torch.Tensor) -> torch.Tensor:
+    while tensor.dim() > 2 and tensor.shape[0] == 1:
+        tensor = tensor.squeeze(0)
+    return tensor
+
+
+def _pad_sequence_tensor(tensor: torch.Tensor, target_tokens: int) -> torch.Tensor:
+    if tensor.shape[-2] >= target_tokens:
+        return tensor
+
+    return torch.nn.functional.pad(tensor, (0, 0, 0, target_tokens - tensor.shape[-2]))
+
+
+def _cond_to_tensor(cond) -> torch.Tensor:
+    if isinstance(cond, dict):
+        for key in ("crossattn", "cross_attn"):
+            tensor = cond.get(key)
+            if torch.is_tensor(tensor):
+                return tensor
+
+    if torch.is_tensor(cond):
+        return cond
+
+    if isinstance(cond, (list, tuple)):
+        if len(cond) == 1:
+            return _cond_to_tensor(cond[0])
+
+        tensors = [_squeeze_single_conditioning(_cond_to_tensor(item)) for item in cond]
+        max_tokens = max(tensor.shape[-2] for tensor in tensors)
+        tensors = [_pad_sequence_tensor(tensor, max_tokens) for tensor in tensors]
+        return torch.stack(tensors, dim=0)
+
+    raise TypeError(f"Unsupported Forge Couple Anima conditioning type: {type(cond)!r}")
+
+
+def _fit_cond_batch(cond: torch.Tensor, batch_size: int) -> torch.Tensor:
+    if cond.dim() == 2:
+        cond = cond.unsqueeze(0)
+    if cond.dim() == 4 and cond.shape[1] == 1:
+        cond = cond.squeeze(1)
+
+    if cond.shape[0] == batch_size:
+        return cond
+
+    if cond.shape[0] == 1:
+        return cond.repeat(batch_size, 1, 1)
+
+    repeats = (batch_size + cond.shape[0] - 1) // cond.shape[0]
+    return cond.repeat(repeats, 1, 1)[:batch_size]
+
+
+def _pad_to_token_multiple(cond: torch.Tensor, multiple: int = 512) -> torch.Tensor:
+    target_tokens = math.ceil(cond.shape[-2] / multiple) * multiple
+    return _pad_sequence_tensor(cond, target_tokens)
+
+
 class AttentionCoupleAnima:
 
     @staticmethod
@@ -30,12 +86,12 @@ class AttentionCoupleAnima:
         conds: list[torch.Tensor] = []
 
         for i in range(1, num_conds):
-            c = kwargs[f"cond_{i}"][0][0].to(device=device, dtype=dtype)
-            if (dim := math.ceil(c.shape[0] / 512) * 512) > 512:
-                c = torch.nn.functional.pad(c, (0, 0, 0, dim - c.shape[0]))
+            c = _cond_to_tensor(kwargs[f"cond_{i}"])
+            c = _fit_cond_batch(c, c.shape[0] if c.dim() > 2 else 1)
+            c = _pad_to_token_multiple(c).to(device=device, dtype=dtype)
             conds.append(c)
 
-        num_tokens = [cond.shape[1] for cond in conds]
+        num_tokens = [cond.shape[-2] for cond in conds]
 
         SelfCrossAttention.couple_orig_forward = SelfCrossAttention.forward
 
@@ -86,7 +142,9 @@ class AttentionCoupleAnima:
 
             conds_tensor = torch.cat(
                 [
-                    cond.repeat(batch_size, lcm_tokens // cond.shape[-2], 1)
+                    _fit_cond_batch(cond, batch_size).repeat(
+                        1, lcm_tokens // cond.shape[-2], 1
+                    )
                     for cond in conds
                 ],
                 dim=0,

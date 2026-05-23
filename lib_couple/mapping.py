@@ -12,7 +12,22 @@ def empty_tensor(h: int, w: int) -> torch.Tensor:
     return torch.zeros((h, w)).unsqueeze(0)
 
 
-def text2cond(sd_model, texts: str) -> list[torch.Tensor]:
+def _is_batched_couples(couples: list) -> bool:
+    return bool(couples) and isinstance(couples[0], list)
+
+
+def _region_count(couples: list) -> int:
+    return len(couples[0]) if _is_batched_couples(couples) else len(couples)
+
+
+def _region_texts(couples: list, index: int) -> list[str]:
+    if _is_batched_couples(couples):
+        return [batch[index] for batch in couples]
+
+    return [couples[index]]
+
+
+def text2cond(sd_model, texts: list[str]) -> list[torch.Tensor]:
     cond = sd_model.get_learned_conditioning(texts)
 
     if sd_model.is_sdxl:
@@ -41,7 +56,7 @@ def basic_mapping(
 
     for tile in range(line_count):
         # ===== Cond =====
-        texts = SdConditioning([couples[tile]], False, width, height, None)
+        texts = SdConditioning(_region_texts(couples, tile), False, width, height, None)
         fc_args[f"cond_{tile + 1}"] = text2cond(sd_model, texts)
         # ===== Cond =====
 
@@ -81,11 +96,13 @@ def advanced_mapping(
     mapping: list,
 ) -> dict:
     fc_args: dict = {}
-    assert len(couples) == len(mapping)
+    assert _region_count(couples) == len(mapping)
 
     for tile_index, (x1, x2, y1, y2, w) in enumerate(mapping):
         # ===== Cond =====
-        texts = SdConditioning([couples[tile_index]], False, width, height, None)
+        texts = SdConditioning(
+            _region_texts(couples, tile_index), False, width, height, None
+        )
         fc_args[f"cond_{tile_index + 1}"] = text2cond(sd_model, texts)
         # ===== Cond =====
 
@@ -138,7 +155,7 @@ def mask_mapping(
 
     for layer in range(line_count):
         # ===== Cond =====
-        texts = SdConditioning([couples[layer]], False, width, height, None)
+        texts = SdConditioning(_region_texts(couples, layer), False, width, height, None)
         fc_args[f"cond_{layer + 1}"] = text2cond(sd_model, texts)
         # ===== Cond =====
 

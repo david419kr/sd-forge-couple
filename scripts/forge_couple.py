@@ -35,6 +35,7 @@ class ForgeCouple(scripts.Script):
     def __init__(self):
         self.is_img2img: bool
         self.couples: list
+        self.couple_batches: list[list[str]]
         self.get_mask: Callable
         self.is_hr: bool
 
@@ -148,6 +149,7 @@ class ForgeCouple(scripts.Script):
         **kwargs,
     ):
         self.couples = None
+        self.couple_batches = None
         if not enable:
             return
 
@@ -158,19 +160,33 @@ class ForgeCouple(scripts.Script):
         if not separator.strip():
             separator = "\n"
 
-        prompts: str = kwargs["prompts"][0]
+        raw_prompts = kwargs.get("prompts") or [getattr(p, "prompt", "")]
+        couple_batches: list[list[str]] = []
 
-        if common_parser in ("{ }", "< >"):
-            prompts = self.parse_common_prompt(
-                prompts,
-                common_parser.split(" "),
-                def_in_prompt,
-            )
-            if common_debug:
-                print("")
-                logger.info(f"[Common Prompts Debug]\n{prompts}\n")
+        for batch_index, prompt in enumerate(raw_prompts):
+            prompt = str(prompt or "")
 
-        couples: list[str] = [chunk.strip() for chunk in prompts.split(separator)]
+            if common_parser in ("{ }", "< >"):
+                prompt = self.parse_common_prompt(
+                    prompt,
+                    common_parser.split(" "),
+                    def_in_prompt,
+                )
+                if common_debug:
+                    print("")
+                    logger.info(f"[Common Prompts Debug #{batch_index + 1}]\n{prompt}\n")
+
+            couple_batches.append([chunk.strip() for chunk in prompt.split(separator)])
+
+        couples: list[str] = couple_batches[0]
+        for batch_index, batch_couples in enumerate(couple_batches[1:], start=2):
+            if len(batch_couples) != len(couples):
+                logger.error(
+                    "Number of Couple lines must match within the same batch... "
+                    f"[1: {len(couples)} / {batch_index}: {len(batch_couples)}]"
+                )
+                self.invalidate(p)
+                return
 
         match mode:
             case "Basic":
@@ -233,6 +249,7 @@ class ForgeCouple(scripts.Script):
         # ===== Infotext =====
 
         self.couples = couples
+        self.couple_batches = couple_batches
         self.valid = True
 
     def before_process_batch(self, p, *args, **kwargs):
@@ -272,6 +289,7 @@ class ForgeCouple(scripts.Script):
         NO_BACKGROUND: bool = background == "None"
 
         LINE_COUNT: int = len(self.couples)
+        COUPLES = self.couple_batches or self.couples
 
         if mode != "Advanced":
             BG_WEIGHT: float = 0.0 if NO_BACKGROUND else max(0.1, background_weight)
@@ -289,7 +307,7 @@ class ForgeCouple(scripts.Script):
             case "Basic":
                 fc_args = basic_mapping(
                     p.sd_model,
-                    self.couples,
+                    COUPLES,
                     WIDTH,
                     HEIGHT,
                     LINE_COUNT,
@@ -305,7 +323,7 @@ class ForgeCouple(scripts.Script):
 
                 fc_args = mask_mapping(
                     p.sd_model,
-                    self.couples,
+                    COUPLES,
                     WIDTH,
                     HEIGHT,
                     LINE_COUNT,
@@ -316,7 +334,7 @@ class ForgeCouple(scripts.Script):
 
             case "Advanced":
                 fc_args = advanced_mapping(
-                    p.sd_model, self.couples, WIDTH, HEIGHT, mapping
+                    p.sd_model, COUPLES, WIDTH, HEIGHT, mapping
                 )
         # ===== Tiles =====
 
